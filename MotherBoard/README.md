@@ -8,7 +8,7 @@ This repository contains all resources required to review, manufacture, and asse
 
 ## Preview
 
-![3D Model](3dModel.gif)
+![3D Model](3dmodel.gif)
 
 ---
 
