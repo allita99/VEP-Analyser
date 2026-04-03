@@ -1,0 +1,846 @@
+#include "dataSampling.h"
+
+void setBit(uint8_t* array, int index, bool value) {
+    int byteIndex = index / 8;
+    int bitIndex = 7 - index % 8; //left to right
+    
+    if (value) {
+        array[byteIndex] |= (1 << bitIndex);  //1
+    } else {
+        array[byteIndex] &= ~(1 << bitIndex); //0
+    }
+}
+
+void setBit32(uint32_t* array, int index, bool value) {
+    int byteIndex = index / 32;
+    int bitIndex = 31 - index % 32; // Left to right for 32 bits
+
+    if (value) {
+        array[byteIndex] |= (1UL << bitIndex);  // Set bit
+    } else {
+        array[byteIndex] &= ~(1UL << bitIndex); // Clear bit
+    } // apparently UL stands for unsigned long forcing the 1 to be a 32 bit variable with the value 1 preventing possible type conversions for saving cpu cycles
+}
+
+bool getBit(uint8_t* array, int index) {
+    int byteIndex = index / 8;
+    int bitIndex = 7 - index % 8;
+    return (array[byteIndex] >> bitIndex) & 1; 
+}
+
+bool getBit32(uint32_t* array, int index) {
+    int byteIndex = index / 32;
+    int bitIndex = 31 - index % 32; // Left to right for 32 bits
+    return (array[byteIndex] >> bitIndex) & 1;
+}
+
+void printSavedData(uint8_t* sensorData,int byteSize , Stream& serial){
+      for (int i = byteSize-1 ; i >= 0; i--) {
+        Serial.print(sensorData[i], BIN); //printout in binary
+        Serial.println(" ");
+      }
+}
+
+void printSavedData32(uint32_t* sensorData, int byteSize, Stream& serial) {
+    for (int i = byteSize - 1; i >= 0; i--) {
+        serial.print(sensorData[i], BIN); // Printout in binary
+        serial.println(" ");
+    }
+}
+
+// int getGoldenSequence(uint32_t* inputArray, int inputBitSize, int sequenceCount){
+//    // Iterate through each sequence in the `sequences` array
+//     for (int seqIndex = 0; seqIndex < sequenceCount; ++seqIndex) {
+//         const GSequence& currentSequence = gsequences[seqIndex];
+//         int sequenceBitSize = currentSequence.bitLength;
+
+//         int matchCount = 0; // Count of matching bits in a row
+
+//         // Iterate through the input array
+//         for (int inputIndex = 0; inputIndex < inputBitSize; ++inputIndex) {
+//             // Calculate the position within the sequence
+//             int sequencePos = matchCount % sequenceBitSize;
+
+//             // Check if the current bit matches
+//             if (getBit32(inputArray, inputIndex) == getBit32(currentSequence.sequence, sequencePos)) {
+//                 matchCount++;
+//             } else {
+//                 // Reset match count if there's a mismatch
+//                 matchCount = 0;
+//             }
+
+//             // Check if a full cycle of the sequence has been matched
+//             if (matchCount >= sequenceBitSize) {
+//                 //Serial.print("Polynomial: ");
+//                 //Serial.println(currentSequence.tapPoints, BIN);
+//                 return currentSequence.identifier;
+//             }
+//         }
+//     }
+
+//     // No full cycle of any sequence found
+//     //Serial.println("-");
+//     return 0;
+
+// }
+
+void downSample(uint8_t* array, uint8_t* reData, int byteSize, int targetFrequency) {
+    if (targetFrequency > 1000 || targetFrequency <= 0) { //prevent wierd frequencies
+        return;
+    }
+    double N = 1000.0 / targetFrequency; //period
+    double position = 0.0; //track position
+    int bitSize = byteSize*8;
+    for (int i = 0; i < bitSize; i++) {
+        int index = static_cast<int>(position + 0.5); // apparently this jsut removes the decimal part so adding 0.5 so that it acts like rounding as well.
+        if (index >= bitSize) {
+            break; 
+        }
+        int value = getBit(array, index); 
+        setBit(reData, i, value);
+        position += N;
+        }
+}
+
+void downSample32(uint32_t* array, uint32_t* reData, int byteSize, int targetFrequency) {
+    if (targetFrequency > 1000 || targetFrequency <= 0) {
+        return; //prevent weird frequencies
+    }
+    double N = 1000.0 / targetFrequency; //period
+    double position = 0.0;               //position
+    int bitSize = byteSize * 32;
+    for (int i = 0; i < bitSize; i++) {
+        int index = static_cast<int>(position + 0.5); //rounding
+        if (index >= bitSize) {
+            break;
+        }
+        int value = getBit32(array, index);
+        setBit32(reData, i, value);
+        position += N;
+    }
+}
+
+int shortestVSlongestChanges(uint8_t* reData, int arraySizeBits) {
+    int noChangeCounter = 0;
+    int longestChangeCount = 0;
+    int shortestChangeCount = arraySizeBits;  // each cell contains 8 data points as well || Might cause bugs in future
+    int previousBit = 2;  
+    for (int i = 0; i < arraySizeBits; i++) {
+        int currentBit = getBit(reData, i);
+
+        if (previousBit == currentBit) {
+            noChangeCounter++;
+            if (noChangeCounter > longestChangeCount) {
+                longestChangeCount = noChangeCounter;
+            }
+        } 
+        else {
+            if (noChangeCounter > 0 && noChangeCounter < shortestChangeCount) {
+                shortestChangeCount = noChangeCounter;
+            }
+            noChangeCounter = 1;  // Reset counter to 1 because the current bit is different
+        }
+
+        previousBit = currentBit;
+    }
+    //If there were no changes or only one continuous sequence
+    if (shortestChangeCount == arraySizeBits) {
+        shortestChangeCount = 0;
+    }
+
+    return longestChangeCount/shortestChangeCount;
+}
+
+int shortestVSlongestChanges32(uint32_t* reData, int arraySizeBits) {
+    int noChangeCounter = 0;
+    int longestChangeCount = 0;
+    int shortestChangeCount = arraySizeBits;  // Initialize to max
+    int previousBit = 2;  // Invalid starting value
+    bool allZeros = true;  // Flag to detect all zeros
+    for (int i = 0; i < arraySizeBits; i++) {
+        int currentBit = getBit32(reData, i);
+        if (currentBit != 0) {
+            allZeros = false;  // Non-zero bit found
+        }
+        if (previousBit == currentBit) {
+            noChangeCounter++;
+            if (noChangeCounter > longestChangeCount) {
+                longestChangeCount = noChangeCounter;
+            }
+        } else {
+            if (noChangeCounter > 0 && noChangeCounter < shortestChangeCount) {
+                shortestChangeCount = noChangeCounter;
+            }
+            noChangeCounter = 1;
+        }
+        previousBit = currentBit;
+    }
+    // If input contains only zeros, return 0
+    if (allZeros) {
+        return 0;
+    }
+    if (shortestChangeCount == arraySizeBits) {
+        shortestChangeCount = 1;  // Avoid division by zero
+    }
+    return longestChangeCount / shortestChangeCount;
+}
+
+String getPolynomial(uint8_t tapPoints) {
+    String polynomial = "";
+    bool firstTerm = true;
+    for (int i = 7; i >= 0; i--) {
+        if (tapPoints & (1 << i)) {
+            if (!firstTerm) {
+                polynomial += " + ";
+            }
+            if (i == 0) {
+                polynomial += "x";
+            }
+            else {
+                polynomial += "x" + String(i+1);
+            firstTerm = false;
+        }
+    }
+    }
+    if (polynomial == "")
+        polynomial = "NaN"; // In case no bits are set, return "0"
+    else if(tapPoints == 0b00000000)
+      polynomial = "NaN"; // if tap points are zero
+    else
+        polynomial += " + 1";
+    return polynomial;
+}
+
+bool frequencyAnalysis(uint8_t* inputArray, uint8_t& peakFreqArray, uint8_t fs){
+}
+
+// bool compareSequences(uint8_t* inputArray, int inputBitSize, int sequenceCount) {
+//     // Validate longest pulse in the input array
+//     int longestPulse = shortestVSlongestChanges(inputArray, inputBitSize);
+//     if (longestPulse < 5) {
+//         //Serial.println("<");
+//         return false;
+//     }
+//     else if (longestPulse > 17) {
+//         //Serial.println(">");
+//         return false;
+//     }
+//     // else{
+//     //   Serial.print(".");
+//     //   Serial.print(longestPulse);
+//     // }
+
+//     // Iterate through each sequence in the `sequences` array
+//     for (int seqIndex = 0; seqIndex < sequenceCount; ++seqIndex) {
+//         const MSequence& currentSequence = sequences[seqIndex];
+//         int sequenceBitSize = currentSequence.bitLength;
+
+//         int matchCount = 0; // Count of matching bits in a row
+
+//         // Iterate through the input array
+//         for (int inputIndex = 0; inputIndex < inputBitSize; ++inputIndex) {
+//             // Calculate the position within the sequence
+//             int sequencePos = matchCount % sequenceBitSize;
+
+//             // Check if the current bit matches
+//             if (getBit(inputArray, inputIndex) == getBit(currentSequence.sequence, sequencePos)) {
+//                 matchCount++;
+//             } else {
+//                 // Reset match count if there's a mismatch
+//                 matchCount = 0;
+//             }
+
+//             // Check if a full cycle of the sequence has been matched
+//             if (matchCount >= sequenceBitSize) {
+//                 Serial.print("Polynomial: ");
+//                 Serial.println(currentSequence.tapPoints, BIN);
+//                 return true;
+//             }
+            
+//         }
+//     }
+
+//     // No full cycle of any sequence found
+//     //Serial.println("-");
+//     return false;
+// }
+
+uint8_t compareSequences32(uint32_t* inputArray, int inputBitSize, int sequenceCount) {
+    // Validate longest pulse in the input array
+    // int longestPulse = shortestVSlongestChanges32(inputArray, inputBitSize);
+    // if (longestPulse < 5 || longestPulse > 17) {
+    //     //Serial.println("<");
+    //     return 0;
+    // } else if (longestPulse == 0) {
+    //     //Serial.println(">");
+    //     return 0;
+    // }
+
+    //go through each sequence in the  array
+    for (int seqIndex = 0; seqIndex < sequenceCount; ++seqIndex) {
+        const MSequence& currentSequence = sequences[seqIndex];
+        int sequenceBitSize = currentSequence.bitLength;
+        int matchCount = 0;
+
+        // go through the data
+        for (int inputIndex = 0; inputIndex < inputBitSize; ++inputIndex) {
+            // Calculate the position within the sequence
+            int sequencePos = matchCount % sequenceBitSize;
+
+            // Check if the current bit matches
+            if (getBit32(inputArray, inputIndex) == getBit32(currentSequence.sequence, sequencePos)) {
+                matchCount++;
+            } else {
+                // Reset match count if there's a mismatch
+                matchCount = 0;
+            }
+
+            // Check if a full cycle of the sequence has been matched
+            if (matchCount >= sequenceBitSize) {
+                //Serial.print("Polynomial: ");
+                //Serial.println(currentSequence.tapPoints, BIN);
+                return currentSequence.tapPoints;
+            }
+        }
+    }
+
+    // No full cycle of any sequence found
+    //Serial.println("-");
+    return 0;
+}
+
+
+// bool compareSequences(uint8_t* inputArray, int inputBitSize, int sequenceCount) {
+//   int longestPulse = shortestVSlongestChanges(inputArray,inputBitSize);
+//   if(longestPulse < 5){  //TODO add filter for sequence lengths
+//     Serial.println("<");
+//     return false;
+//   }
+//   if(longestPulse > 17){
+//     Serial.println(">");
+//     return false;
+//   }
+//     for (int s = 0; s < sequenceCount; ++s) {
+//         const MSequence seq = sequences[s];
+//         int seqBitSize = seq.bitLength;
+        
+//         // Iterate through the input array bit by bit
+//         for (int i = 0; i <= inputBitSize - seqBitSize; ++i) {
+//             bool match = true;
+
+//             // Compare bits in the current window
+//             for (int j = 0; j < seqBitSize; ++j) {
+//                 if (getBit(inputArray, i + j) != getBit(seq.sequence, j)) {
+//                     match = false;
+//                     break;
+//                 }
+//             }
+
+//             if (match) {
+//                 Serial.print("Sequence found: ");
+//                 Serial.println(s);
+//                 return true;
+//             }
+            
+//         }
+//     }
+//     Serial.print("-");
+//     // No sequence found
+//     return false;
+// }
+
+
+
+
+// 31-bit binary sequences || 24 bytes used
+uint32_t sequence5n1[1] = {0b00011011101010000100101100111110}; // ignore position 31
+uint32_t sequence5n2[1] = {0b00110100100001010111011000111110}; // ignore position 31
+uint32_t sequence5n3[1] = {0b00100110000101101010001110111110}; // ignore position 31
+uint32_t sequence5n4[1] = {0b01000100101011000011100110111110}; // ignore position 31
+uint32_t sequence5n5[1] = {0b01100111000011010100100010111110}; // ignore position 31
+uint32_t sequence5n6[1] = {0b01110001010110100001100100111110}; // ignore position 31
+
+// 63-bit binary sequences || 48 bytes used
+uint32_t sequence6n1[2] = {
+    0b00000100001100010100111101000111,
+    0b00100101101110110011010101111110}; // ignore position 63
+
+uint32_t sequence6n2[2] = {
+    0b00101010001100111101110101101001,
+    0b10110001001000011100000101111110}; // ignore position 63
+
+uint32_t sequence6n3[2] = {
+    0b01010110011011101101001001110001,
+    0b01111001010001100001000001111110}; // ignore position 63
+
+uint32_t sequence6n4[2] = {
+    0b01011100011001110110000011110010,
+    0b01010100110100001000101101111110}; // ignore position 63
+
+uint32_t sequence6n5[2] = {
+    0b01000001110000100100011011001011,
+    0b01011101111001100010101001111110}; // ignore position 63
+
+uint32_t sequence6n6[2] = {
+    0b01101000100001011001010100100111,
+    0b10000011011100110001110101111110}; // ignore position 63
+
+// 127-bit binary sequences || 288 bytes used
+uint32_t sequence7n1[4] = {
+    0b00000010000011000010100011110010,
+    0b00101100111010100111110100001110,
+    0b00100100110110101101111011000110,
+    0b10010111011100110010101011111110}; // ignore position 127
+
+uint32_t sequence7n2[4] = {
+    0b00001110111100101100100100000010,
+    0b00100110001011101011011000001100,
+    0b11010100111001111011010000101010,
+    0b11111010010100011011100011111110}; // ignore position 127
+
+uint32_t sequence7n3[4] = {
+    0b00001010110001001111001010010010,
+    0b11010101000001100100001110101110,
+    0b01110001101100110000001000111110,
+    0b10011010001011110110111011111110}; // ignore position 127
+
+uint32_t sequence7n4[4] = {
+    0b00011101100010100101111101010100,
+    0b00101101111001110010101100110000,
+    0b01101101011101000110010001000000,
+    0b10010011010011110111000011111110}; // ignore position 127
+
+uint32_t sequence7n5[4] = {
+    0b00010101011110011001010001000110,
+    0b00011110111110101101010011011001,
+    0b11011011101001001011000111001000,
+    0b01011100000110100000010011111110}; // ignore position 127
+
+uint32_t sequence7n6[4] = {
+    0b00110110101010001001001100111100,
+    0b01110111010111101001011001010011,
+    0b10010001100010111000010000110100,
+    0b00011111011000000101011011111110}; // ignore position 127
+
+uint32_t sequence7n7[4] = {
+    0b00111110110111000000101000011011,
+    0b00100000111100010110101100001000,
+    0b10011101111010001100110100110001,
+    0b11001010101110101001001011111110}; // ignore position 127
+
+uint32_t sequence7n8[4] = {
+    0b00100000010110000011101000010011,
+    0b10001101001001011101101110011011,
+    0b00101011010111110111100001100010,
+    0b00101001100111101010100011111110}; // ignore position 127
+
+uint32_t sequence7n9[4] = {
+    0b00100100001100000010110110001010,
+    0b00001110110100111100001001101110,
+    0b10001000110101100111001100101111,
+    0b01010010101011100011111011111110}; // ignore position 127
+
+uint32_t sequence7n10[4] = {
+    0b01010100110011101110100101100011,
+    0b01111011010110110010010001110000,
+    0b10111110010101110011010001001111,
+    0b00010100001100000100000011111110}; // ignore position 127
+
+uint32_t sequence7n11[4] = {
+    0b01011011101111000111010001010111,
+    0b00000011110110011000100100111001,
+    0b11110010000010001101010100110110,
+    0b10010100001011000011001011111110}; // ignore position 127
+
+uint32_t sequence7n12[4] = {
+    0b01001100001101000010100101101100,
+    0b10101011000100000100111110011100,
+    0b10010001100110111100000011101010,
+    0b00101110001111011101101011111110}; // ignore position 127
+
+uint32_t sequence7n13[4] = {
+    0b01001001010111010101001110001100,
+    0b10110011000101111011100100010000,
+    0b11010110100011110000010011011000,
+    0b01010000001110110111110011111110}; // ignore position 127
+
+uint32_t sequence7n14[4] = {
+    0b01101010000001101111100000101100,
+    0b00100001110100011000100111001010,
+    0b01101001011110101110111000111100,
+    0b11001001000101010110110011111110}; // ignore position 127
+
+uint32_t sequence7n15[4] = {
+    0b01100101100011001101101000111110,
+    0b00011100010100110000001101011101,
+    0b00101010110111001000010001001001,
+    0b11101010000010111100111011111110}; // ignore position 127
+
+uint32_t sequence7n16[4] = {
+    0b01110110111101000101100101111100,
+    0b01000000110011011000111001110101,
+    0b11000010011000001010101101001001,
+    0b01001111001000110101000011111110}; // ignore position 127
+
+uint32_t sequence7n17[4] = {
+    0b01110011110100000101011110010010,
+    0b00100001001110110101010010111010,
+    0b11000000110010100011100001111100,
+    0b01011011001100011010011011111110}; // ignore position 127
+
+uint32_t sequence7n18[4] = {
+    0b01111100011101010100101011110100,
+    0b11001110011010110001000101110110,
+    0b01000011110010110111000001010001,
+    0b10110100000011000010010011111110}; // ignore position 127
+
+
+
+
+
+// 31-bit binary sequences || 24 bytes used
+// uint8_t sequence5n1[4] = {0b00011011, 0b10101000, 0b01001011, 0b00111110}; // ignore position 31
+// uint8_t sequence5n2[4] = {0b00110100, 0b10000101, 0b01110110, 0b00111110}; // ignore position 31
+// uint8_t sequence5n3[4] = {0b00100110, 0b00010110, 0b10100011, 0b10111110}; // ignore position 31
+// uint8_t sequence5n4[4] = {0b01000100, 0b10101100, 0b00111001, 0b10111110}; // ignore position 31
+// uint8_t sequence5n5[4] = {0b01100111, 0b00001101, 0b01001000, 0b10111110}; // ignore position 31
+// uint8_t sequence5n6[4] = {0b01110001, 0b01011010, 0b00011001, 0b00111110}; // ignore position 31
+//Taps
+// 1 0 1 0 0
+// 1 0 0 1 0
+// 1 1 1 1 0
+// 1 1 1 0 1
+// 1 1 0 1 1
+// 1 0 1 1 1
+
+
+// 63-bit binary sequences || 48 bytes used
+// uint8_t sequence6n1[8] = {0b00000100, 0b00110001, 0b01001111, 0b01000111, 0b00100101, 0b10111011, 0b00110101, 0b01111110}; // ignore position 63
+// uint8_t sequence6n2[8] = {0b00101010, 0b00110011, 0b11011101, 0b01101001, 0b10110001, 0b00100001, 0b11000001, 0b01111110}; // ignore position 63
+// uint8_t sequence6n3[8] = {0b01010110, 0b01101110, 0b11010010, 0b01110001, 0b01111001, 0b01000110, 0b00010000, 0b01111110}; // ignore position 63
+// uint8_t sequence6n4[8] = {0b01011100, 0b01100111, 0b01100000, 0b11110010, 0b01010100, 0b11010000, 0b10001011, 0b01111110}; // ignore position 63
+// uint8_t sequence6n5[8] = {0b01000001, 0b11000010, 0b01000110, 0b11001011, 0b01011101, 0b11100110, 0b00101010, 0b01111110}; // ignore position 63
+// uint8_t sequence6n6[8] = {0b01101000, 0b10000101, 0b10010101, 0b00100111, 0b10000011, 0b01110011, 0b00011101, 0b01111110}; // ignore position 63
+//Taps
+// 1 1 0 0 0 0
+// 1 1 0 1 1 0
+// 1 0 0 0 0 1
+// 1 1 1 0 0 1
+// 1 0 1 1 0 1
+// 1 1 0 0 1 1
+
+
+// 127-bit binary sequences || 288 bytes used
+// uint8_t sequence7n1[16]  = {0b00000010, 0b00001100, 0b00101000, 0b11110010, 0b00101100, 0b11101010, 0b01111101, 0b00001110, 0b00100100, 0b11011010, 0b11011110, 0b11000110, 0b10010111, 0b01110011, 0b00101010, 0b11111110}; // ignore position 127
+// uint8_t sequence7n2[16]  = {0b00001110, 0b11110010, 0b11001001, 0b00000010, 0b00100110, 0b00101110, 0b10110110, 0b00001100, 0b11010100, 0b11100111, 0b10110100, 0b00101010, 0b11111010, 0b01010001, 0b10111000, 0b11111110}; // ignore position 127
+// uint8_t sequence7n3[16]  = {0b00001010, 0b11000100, 0b11110010, 0b10010010, 0b11010101, 0b00000110, 0b01000011, 0b10101110, 0b01110001, 0b10110011, 0b00000010, 0b00111110, 0b10011010, 0b00101111, 0b01101110, 0b11111110}; // ignore position 127
+// uint8_t sequence7n4[16]  = {0b00011101, 0b10001010, 0b01011111, 0b01010100, 0b00101101, 0b11100111, 0b00101011, 0b00110000, 0b01101101, 0b01110100, 0b01100100, 0b01000000, 0b10010011, 0b01001111, 0b01110000, 0b11111110}; // ignore position 127
+// uint8_t sequence7n5[16]  = {0b00010101, 0b01111001, 0b10010100, 0b01000110, 0b00011110, 0b11111010, 0b11010100, 0b11011001, 0b11011011, 0b10100100, 0b10110001, 0b11001000, 0b01011100, 0b00011010, 0b00000100, 0b11111110}; // ignore position 127
+// uint8_t sequence7n6[16]  = {0b00110110, 0b10101000, 0b10010011, 0b00111100, 0b01110111, 0b01011110, 0b10010110, 0b01010011, 0b10010001, 0b10001011, 0b10000100, 0b00110100, 0b00011111, 0b01100000, 0b01010110, 0b11111110}; // ignore position 127
+// uint8_t sequence7n7[16]  = {0b00111110, 0b11011100, 0b00001010, 0b00011011, 0b00100000, 0b11110001, 0b01101011, 0b00001000, 0b10011101, 0b11101000, 0b11001101, 0b00110001, 0b11001010, 0b10111010, 0b10010010, 0b11111110}; // ignore position 127
+// uint8_t sequence7n8[16]  = {0b00100000, 0b01011000, 0b00111010, 0b00010011, 0b10001101, 0b00100101, 0b11011011, 0b10011011, 0b00101011, 0b01011111, 0b01111000, 0b01100010, 0b00101001, 0b10011110, 0b10101000, 0b11111110}; // ignore position 127
+// uint8_t sequence7n9[16]  = {0b00100100, 0b00110000, 0b00101101, 0b10001010, 0b00001110, 0b11010011, 0b11000010, 0b01101110, 0b10001000, 0b11010110, 0b01110011, 0b00101111, 0b01010010, 0b10101110, 0b00111110, 0b11111110}; // ignore position 127
+// uint8_t sequence7n10[16] = {0b01010100, 0b11001110, 0b11101001, 0b01100011, 0b01111011, 0b01011011, 0b00100100, 0b01110000, 0b10111110, 0b01010111, 0b00110100, 0b01001111, 0b00010100, 0b00110000, 0b01000000, 0b11111110}; // ignore position 127
+// uint8_t sequence7n11[16] = {0b01011011, 0b10111100, 0b01110100, 0b01010111, 0b00000011, 0b11011001, 0b10001001, 0b00111001, 0b11110010, 0b00001000, 0b11010101, 0b00110110, 0b10010100, 0b00101100, 0b00110010, 0b11111110}; // ignore position 127
+// uint8_t sequence7n12[16] = {0b01001100, 0b00110100, 0b00101001, 0b01101100, 0b10101011, 0b00010000, 0b01001111, 0b10011100, 0b10010001, 0b10011011, 0b11000000, 0b11101010, 0b00101110, 0b00111101, 0b11011010, 0b11111110}; // ignore position 127
+// uint8_t sequence7n13[16] = {0b01001001, 0b01011101, 0b01010011, 0b10001100, 0b10110011, 0b00010111, 0b10111001, 0b00010000, 0b11010110, 0b10001111, 0b00000100, 0b11011000, 0b01010000, 0b00111011, 0b01111100, 0b11111110}; // ignore position 127
+// uint8_t sequence7n14[16] = {0b01101010, 0b00000110, 0b11111000, 0b00101100, 0b00100001, 0b11010001, 0b10001001, 0b11001010, 0b01101001, 0b01111010, 0b11101110, 0b00111100, 0b11001001, 0b00010101, 0b01101100, 0b11111110}; // ignore position 127
+// uint8_t sequence7n15[16] = {0b01100101, 0b10001100, 0b11011010, 0b00111110, 0b00011100, 0b01010011, 0b00000011, 0b01011101, 0b00101010, 0b11011100, 0b10000100, 0b01001001, 0b11101010, 0b00001011, 0b11001110, 0b11111110}; // ignore position 127
+// uint8_t sequence7n16[16] = {0b01110110, 0b11110100, 0b01011001, 0b01111100, 0b01000000, 0b11001101, 0b10001110, 0b01110101, 0b11000010, 0b01100000, 0b10101011, 0b01001001, 0b01001111, 0b00100011, 0b01010000, 0b11111110}; // ignore position 127
+// uint8_t sequence7n17[16] = {0b01110011, 0b11010000, 0b01010111, 0b10010010, 0b00100001, 0b00111011, 0b01010100, 0b10111010, 0b11000000, 0b11001010, 0b00111000, 0b01111100, 0b01011011, 0b00110001, 0b10100110, 0b11111110}; // ignore position 127
+// uint8_t sequence7n18[16] = {0b01111100, 0b01110101, 0b01001010, 0b11110100, 0b11001110, 0b01101011, 0b00010001, 0b01110110, 0b01000011, 0b11001011, 0b01110000, 0b01010001, 0b10110100, 0b00001100, 0b00100100, 0b11111110}; // ignore position 127
+//Taps
+// 1 1 0 0 0 0 0
+// 1 0 0 1 0 0 0
+// 1 1 1 1 0 0 0
+// 1 0 0 0 1 0 0
+// 1 0 1 1 1 0 0
+// 1 1 1 0 0 1 0
+// 1 1 0 1 0 1 0
+// 1 0 0 1 1 1 0
+// 1 1 1 1 1 1 0
+// 1 0 0 0 0 0 1
+// 1 1 0 1 0 0 1
+// 1 1 0 0 1 0 1
+// 1 0 1 0 1 0 1
+// 1 0 1 0 0 1 1
+// 1 1 1 1 0 1 1
+// 1 0 0 0 1 1 1
+// 1 1 1 0 1 1 1
+// 1 0 1 1 1 1 1
+
+
+const MSequence sequences[] = {
+        {sequence5n1,  31 ,0b00010100}, {sequence5n2,  31 ,0b00010010}, {sequence5n3,  31 ,0b00011110}, {sequence5n4,  31 ,0b00011101},
+        {sequence5n5,  31 ,0b00011011}, {sequence5n6,  31 ,0b00010111},
+
+        {sequence6n1,  63 ,0b00110000}, {sequence6n2,  63 ,0b00110110}, {sequence6n3,  63 ,0b00100001}, {sequence6n4,  63 ,0b00111001},
+        {sequence6n5,  63 ,0b00101101}, {sequence6n6,  63 ,0b00110011},
+
+        {sequence7n1,  127,0b01100000}, {sequence7n2,  127,0b01001000}, {sequence7n3,  127,0b01111000}, {sequence7n4,  127,0b01000100},
+        {sequence7n5,  127,0b01011100}, {sequence7n6,  127,0b01110010}, {sequence7n7,  127,0b01101010}, {sequence7n8,  127,0b01001110},
+        {sequence7n9,  127,0b01111110}, {sequence7n10, 127,0b01000001}, {sequence7n11, 127,0b01101001}, {sequence7n12, 127,0b01100101},
+        {sequence7n13, 127,0b01010101}, {sequence7n14, 127,0b01010011}, {sequence7n15, 127,0b01111011}, {sequence7n16, 127,0b01000111},
+        {sequence7n17, 127,0b01110111}, {sequence7n18, 127,0b01011111}
+    };
+
+
+
+// //31 bit golden sequences
+// uint32_t  gSequence5n1[1] = {0b00001111001011010011110100000000};// ignore position 31(259605760)
+// uint32_t  gSequence5n2[1] = {0b00011101101111101110100010000000};// ignore position 31(487282432)
+// uint32_t  gSequence5n3[1] = {0b01011111000011000111001000000000};// ignore position 31(1591455744)
+// uint32_t  gSequence5n4[1] = {0b01111100101101010011001110000000};// ignore position 31(2121198080)
+// uint32_t  gSequence5n5[1] = {0b01101010111100110101001000000000};// ignore position 31(1792157184)
+// uint32_t  gSequence5n6[1] = {0b00010010101110111110011100000000};// ignore position 31(309657344)
+// uint32_t  gSequence5n7[1] = {0b01010000000011010111110110000000};// ignore position 31(1342087424)
+// uint32_t  gSequence5n8[1] = {0b01110111101101000111111100000000};// ignore position 31(1994531712)
+// uint32_t  gSequence5n9[1] = {0b01100001111100100001111000000000};// ignore position 31(1636667392)
+// uint32_t gSequence5n10[1] = {0b00100010011100011000101110000000};// ignore position 31(584331264)
+// uint32_t gSequence5n11[1] = {0b01000111010010101100110100000000};// ignore position 31(1160580096)
+// uint32_t gSequence5n12[1] = {0b01010010100101110101100000000000};// ignore position 31(1372207104)
+// uint32_t gSequence5n13[1] = {0b00011101011111111000110110000000};// ignore position 31(494980928)
+// uint32_t gSequence5n14[1] = {0b01001000010101011010101110000000};// ignore position 31(1186927488)
+// uint32_t gSequence5n15[1] = {0b00010111010101110001111000000000};// ignore position 31(386863104)
+
+// //63 bit golden Sequences
+// uint32_t  gSequence6n1[2] = { 0b00101110000000101001001000101110 ,0b10010100100110101111010000000000}; // ignore position 63
+// uint32_t  gSequence6n2[2] = { 0b01010010010111111001110100110110 ,0b01011100111111010010010100000000};  // ignore position 63
+// uint32_t  gSequence6n3[2] = { 0b01011000010101100010111110110101 ,0b01110001011010111011111000000000};// ignore position 63
+// uint32_t  gSequence6n4[2] = { 0b01000101111100110000100110001100 ,0b01111000010111010001111100000000}; // ignore position 63
+// uint32_t  gSequence6n5[2] = { 0b01101100101101001101101001100000 ,0b10100110110010000010100000000000}; // ignore position 63
+// uint32_t  gSequence6n6[2] = { 0b01111100010111010000111100011000 ,0b11001000011001111101000100000000}; // ignore position 63
+// uint32_t  gSequence6n7[2] = { 0b01110110010101001011110110011011 ,0b11100101111100010100101000000000}; // ignore position 63
+// uint32_t  gSequence6n8[2] = { 0b01101011111100011001101110100010 ,0b11101100110001111110101100000000}; // ignore position 63
+// uint32_t  gSequence6n9[2] = { 0b01000010101101100100100001001110 ,0b00110010010100101101110000000000}; // ignore position 63
+// uint32_t gSequence6n10[2] = { 0b00001010000010011011001010000011 ,0b00101101100101101001101100000000}; // ignore position 63
+// uint32_t gSequence6n11[2] = { 0b00010111101011001001010010111010 ,0b00100100101000000011101000000000}; // ignore position 63
+// uint32_t gSequence6n12[2] = { 0b00111110111010110100011101010110 ,0b11111010001101010000110100000000}; // ignore position 63
+// uint32_t gSequence6n13[2] = { 0b00011101101001010010011000111001 ,0b00001001001101101010000100000000};// ignore position 63
+// uint32_t gSequence6n14[2] = { 0b00110100111000101111010111010101 ,0b11010111101000111001011000000000}; // ignore position 63
+// uint32_t gSequence6n15[2] = { 0b00101001010001111101001111101100 ,0b11011110100101010011011100000000}; // ignore position 63
+// //127 bit golden sequences
+// uint32_t   gSequence7n1[4] = { 0b00001100111111101110000111110000 ,0b00001010110001001100101100000010 ,0b11110000001111010110101011101100 ,0b01101101001000101001001000000000};
+// uint32_t   gSequence7n2[4] = { 0b00001000110010001101101001100000 ,0b11111001111011000011111010100000 ,0b01010101011010011101110011111000 ,0b00001101010111000100010000000000};
+// uint32_t   gSequence7n3[4] = { 0b00011111100001100111011110100110 ,0b00000001000011010101011000111110 ,0b01001001101011101011101010000110 ,0b00000100001111000101101000000000};
+// uint32_t   gSequence7n4[4] = { 0b00010111011101011011110010110100 ,0b00110010000100001010100111010111 ,0b11111111011111100110111100001110 ,0b11001011011010010010111000000000};
+// uint32_t   gSequence7n5[4] = { 0b00110100101001001011101111001110 ,0b01011011101101001110101101011101 ,0b10110101010100010101101011110010 ,0b10001000000100110111110000000000};
+// uint32_t   gSequence7n6[4] = { 0b00111100110100000010001011101001 ,0b00001100000110110001011000000110 ,0b10111001001100100001001111110111 ,0b01011101110010011011100000000000};
+// uint32_t   gSequence7n7[4] = { 0b00100010010101000001001011100001 ,0b10100001110011111010011010010101 ,0b00001111100001011010011010100100 ,0b10111110111011011000001000000000};
+// uint32_t   gSequence7n8[4] = { 0b00100110001111000000010101111000 ,0b00100010001110011011111101100000 ,0b10101100000011001010110111101001 ,0b11000101110111010001010000000000};
+// uint32_t   gSequence7n9[4] = { 0b01010110110000101100000110010001 ,0b01010111101100010101100101111110 ,0b10011010100011011110101010001001 ,0b10000011010000110110101000000000};
+// uint32_t  gSequence7n10[4] = { 0b01011001101100000101110010100101 ,0b00101111001100111111010000110111 ,0b11010110110100100000101111110000 ,0b00000011010111110001100000000000};
+// uint32_t  gSequence7n11[4] = { 0b01001110001110000000000110011110 ,0b10000111111110100011001010010010 ,0b10110101010000010001111000101100 ,0b10111001010011101111000000000000};
+// uint32_t  gSequence7n12[4] = { 0b01001011010100010111101101111110 ,0b10011111111111011100010000011110 ,0b11110010010101011101101000011110 ,0b11000111010010000101011000000000};
+// uint32_t  gSequence7n13[4] = { 0b01101000000010101101000011011110 ,0b00001101001110111111010011000100 ,0b01001101101000000011000011111010 ,0b01011110011001100100011000000000};
+// uint32_t  gSequence7n14[4] = { 0b01100111100000001111001011001100 ,0b00110000101110010111111001010011 ,0b00001110000001100101101010001111 ,0b01111101011110001110010000000000};
+// uint32_t  gSequence7n15[4] = { 0b01110100111110000111000110001110 ,0b01101100001001111111001101111011 ,0b11100110101110100111010110001111 ,0b11011000010100000111101000000000};
+// uint32_t  gSequence7n16[4] = { 0b01110001110111000111111101100000 ,0b00001101110100010010100110110100 ,0b11100100000100001110011010111010 ,0b11001100010000101000110000000000};
+// uint32_t  gSequence7n17[4] = { 0b01111110011110010110001000000110 ,0b11100010100000010110110001111000 ,0b01100111000100011010111010010111 ,0b00100011011111110000111000000000};
+// uint32_t  gSequence7n18[4] = { 0b00000100001101100011101110010000 ,0b11110011001010001111010110100010 ,0b10100101010101001011011000010100 ,0b01100000011111101101011000000000};
+// uint32_t  gSequence7n19[4] = { 0b00010011011110001001011001010110 ,0b00001011110010011001110100111100 ,0b10111001100100111101000001101010 ,0b01101001000111101100100000000000};
+// uint32_t  gSequence7n20[4] = { 0b00011011100010110101110101000100 ,0b00111000110101000110001011010101 ,0b00001111010000110000010111100010 ,0b10100110010010111011110000000000};
+// uint32_t  gSequence7n21[4] = { 0b00111000010110100101101000111110 ,0b01010001011100000010000001011111 ,0b01000101011011000011000000011110 ,0b11100101001100011110111000000000};
+// uint32_t  gSequence7n22[4] = { 0b00110000001011101100001100011001 ,0b00000110110111111101110100000100 ,0b01001001000011110111100100011011 ,0b00110000111010110010101000000000};
+// uint32_t  gSequence7n23[4] = { 0b00101110101010101111001100010001 ,0b10101011000010110110110110010111 ,0b11111111101110001100110001001000 ,0b11010011110011110001000000000000};
+// uint32_t  gSequence7n24[4] = { 0b00101010110000101110010010001000 ,0b00101000111111010111010001100010 ,0b01011100001100011100011100000101 ,0b10101000111111111000011000000000};
+// uint32_t  gSequence7n25[4] = { 0b01011010001111000010000001100001 ,0b01011101011101011001001001111100 ,0b01101010101100001000000001100101 ,0b11101110011000011111100000000000};
+// uint32_t  gSequence7n26[4] = { 0b01010101010011101011110101010101 ,0b00100101111101110011111100110101 ,0b00100110111011110110000100011100 ,0b01101110011111011000101000000000};
+// uint32_t  gSequence7n27[4] = { 0b01000010110001101110000001101110 ,0b10001101001111101111100110010000 ,0b01000101011111000111010011000000 ,0b11010100011011000110001000000000};
+// uint32_t  gSequence7n28[4] = { 0b01000111101011111001101010001110 ,0b10010101001110010000111100011100 ,0b00000010011010001011000011110010 ,0b10101010011010101100010000000000};
+// uint32_t  gSequence7n29[4] = { 0b01100100111101000011000100101110 ,0b00000111111111110011111111000110 ,0b10111101100111010101101000010110 ,0b00110011010001001101010000000000};
+// uint32_t  gSequence7n30[4] = { 0b01101011011111100001001100111100 ,0b00111010011111011011010101010001 ,0b11111110001110110011000001100011 ,0b00010000010110100111011000000000};
+// uint32_t  gSequence7n31[4] = { 0b01111000000001101001000001111110 ,0b01100110111000110011100001111001 ,0b00010110100001110001111101100011 ,0b10110101011100101110100000000000};
+// uint32_t  gSequence7n32[4] = { 0b01111101001000101001111010010000 ,0b00000111000101011110001010110110 ,0b00010100001011011000110001010110 ,0b10100001011000000001111000000000};
+// uint32_t  gSequence7n33[4] = { 0b01110010100001111000001111110110 ,0b11101000010001011010011101111010 ,0b10010111001011001100010001111011 ,0b01001110010111011001110000000000};
+// uint32_t  gSequence7n34[4] = { 0b00010111010011101010110111000110 ,0b11111000111000010110100010011110 ,0b00011100110001110110011001111110 ,0b00001001011000000001111000000000};
+// uint32_t  gSequence7n35[4] = { 0b00011111101111010110011011010100 ,0b11001011111111001001011101110111 ,0b10101010000101111011001111110110 ,0b11000110001101010110101000000000};
+// uint32_t  gSequence7n36[4] = { 0b00111100011011000110000110101110 ,0b10100010010110001101010111111101 ,0b11100000001110001000011000001010 ,0b10000101010011110011100000000000};
+// uint32_t  gSequence7n37[4] = { 0b00110100000110001111100010001001 ,0b11110101111101110010100010100110 ,0b11101100010110111100111100001111 ,0b01010000100101011111110000000000};
+// uint32_t  gSequence7n38[4] = { 0b00101010100111001100100010000001 ,0b01011000001000111001100000110101 ,0b01011010111011000111101001011100 ,0b10110011101100011100011000000000};
+// uint32_t  gSequence7n39[4] = { 0b00101110111101001101111100011000 ,0b11011011110101011000000111000000 ,0b11111001011001010111000100010001 ,0b11001000100000010101000000000000};
+// uint32_t  gSequence7n40[4] = { 0b01011110000010100001101111110001 ,0b10101110010111010110011111011110 ,0b11001111111001000011011001110001 ,0b10001110000111110010111000000000};
+// uint32_t  gSequence7n41[4] = { 0b01010001011110001000011011000101 ,0b11010110110111111100101010010111 ,0b10000011101110111101011100001000 ,0b00001110000000110101110000000000};
+// uint32_t  gSequence7n42[4] = { 0b01000110111100001101101111111110 ,0b01111110000101100000110000110010 ,0b11100000001010001100001011010100 ,0b10110100000100101011010000000000};
+// uint32_t  gSequence7n43[4] = { 0b01000011100110011010000100011110 ,0b01100110000100011111101010111110 ,0b10100111001111000000011011100110 ,0b11001010000101000001001000000000};
+// uint32_t  gSequence7n44[4] = { 0b01100000110000100000101010111110 ,0b11110100110101111100101001100100 ,0b00011000110010011110110000000010 ,0b01010011001110100000001000000000};
+// uint32_t  gSequence7n45[4] = { 0b01101111010010000010100010101100 ,0b11001001010101010100000011110011 ,0b01011011011011111000011001110111 ,0b01110000001001001010000000000000};
+// uint32_t  gSequence7n46[4] = { 0b01111100001100001010101111101110 ,0b10010101110010111100110111011011 ,0b10110011110100111010100101110111 ,0b11010101000011000011111000000000};
+// uint32_t  gSequence7n47[4] = { 0b01111001000101001010010100000000 ,0b11110100001111010001011100010100 ,0b10110001011110010011101001000010 ,0b11000001000111101100100000000000};
+// uint32_t  gSequence7n48[4] = { 0b01110110101100011011100001100110 ,0b00011011011011010101001011011000 ,0b00110010011110000111001001101111 ,0b00101110001000110100101000000000};
+// uint32_t  gSequence7n49[4] = { 0b00001000111100111100101100010010 ,0b00110011000111011111111111101001 ,0b10110110110100001101010110001000 ,0b11001111010101010111010000000000};
+// uint32_t  gSequence7n50[4] = { 0b00101011001000101100110001101000 ,0b01011010101110011011110101100011 ,0b11111100111111111110000001110100 ,0b10001100001011110010011000000000};
+// uint32_t  gSequence7n51[4] = { 0b00100011010101100101010101001111 ,0b00001101000101100100000000111000 ,0b11110000100111001010100101110001 ,0b01011001111101011110001000000000};
+// uint32_t  gSequence7n52[4] = { 0b00111101110100100110010101000111 ,0b10100000110000101111000010101011 ,0b01000110001010110001110000100010 ,0b10111010110100011101100000000000};
+// uint32_t  gSequence7n53[4] = { 0b00111001101110100111001011011110 ,0b00100011001101001110100101011110 ,0b11100101101000100001011101101111 ,0b11000001111000010100111000000000};
+// uint32_t  gSequence7n54[4] = { 0b01001001010001001011011000110111 ,0b01010110101111000000111101000000 ,0b11010011001000110101000000001111 ,0b10000111011111110011000000000000};
+// uint32_t  gSequence7n55[4] = { 0b01000110001101100010101100000011 ,0b00101110001111101010001000001001 ,0b10011111011111001011000101110110 ,0b00000111011000110100001000000000};
+// uint32_t  gSequence7n56[4] = { 0b01010001101111100111011000111000 ,0b10000110111101110110010010101100 ,0b11111100111011111010010010101010 ,0b10111101011100101010101000000000};
+// uint32_t  gSequence7n57[4] = { 0b01010100110101110000110011011000 ,0b10011110111100001001001000100000 ,0b10111011111110110110000010011000 ,0b11000011011101000000110000000000};
+// uint32_t  gSequence7n58[4] = { 0b01110111100011001010011101111000 ,0b00001100001101101010001011111010 ,0b00000100000011101000101001111100 ,0b01011010010110100001110000000000};
+// uint32_t  gSequence7n59[4] = { 0b01111000000001101000010101101010 ,0b00110001101101000010100001101101 ,0b01000111101010001110000000001001 ,0b01111001010001001011111000000000};
+// uint32_t  gSequence7n60[4] = { 0b01101011011111100000011000101000 ,0b01101101001010101010010101000101 ,0b10101111000101001100111100001001 ,0b11011100011011000010000000000000};
+// uint32_t  gSequence7n61[4] = { 0b01101110010110100000100011000110 ,0b00001100110111000111111110001010 ,0b10101101101111100101110000111100 ,0b11001000011111101101011000000000};
+// uint32_t  gSequence7n62[4] = { 0b01100001111111110001010110100000 ,0b11100011100011000011101001000110 ,0b00101110101111110001010000010001 ,0b00100111010000110101010000000000};
+// uint32_t  gSequence7n63[4] = { 0b00100011110100010000011101111010 ,0b01101001101001000100001010001010 ,0b01001010001011110011010111111100 ,0b01000011011110100101001000000000};
+// uint32_t  gSequence7n64[4] = { 0b00101011101001011001111001011101 ,0b00111110000010111011111111010001 ,0b01000110010011000111110011111001 ,0b10010110101000001001011000000000};
+// uint32_t  gSequence7n65[4] = { 0b00110101001000011010111001010101 ,0b10010011110111110000111101000010 ,0b11110000111110111100100110101010 ,0b01110101100001001010110000000000};
+// uint32_t  gSequence7n66[4] = { 0b00110001010010011011100111001100 ,0b00010000001010010001011010110111 ,0b01010011011100101100001011100111 ,0b00001110101101000011101000000000};
+// uint32_t  gSequence7n67[4] = { 0b01000001101101110111110100100101 ,0b01100101101000011111000010101001 ,0b01100101111100111000010110000111 ,0b01001000001010100100010000000000};
+// uint32_t  gSequence7n68[4] = { 0b01001110110001011110000000010001 ,0b00011101001000110101110111100000 ,0b00101001101011000110010011111110 ,0b11001000001101100011011000000000};
+// uint32_t  gSequence7n69[4] = { 0b01011001010011011011110100101010 ,0b10110101111010101001101101000101 ,0b01001010001111110111000100100010 ,0b01110010001001111101111000000000};
+// uint32_t  gSequence7n70[4] = { 0b01011100001001001100011111001010 ,0b10101101111011010110110111001001 ,0b00001101001010111011010100010000 ,0b00001100001000010111100000000000};
+// uint32_t  gSequence7n71[4] = { 0b01111111011111110110110001101010 ,0b00111111001010110101110100010011 ,0b10110010110111100101111111110100 ,0b10010101000011110110100000000000};
+// uint32_t  gSequence7n72[4] = { 0b01110000111101010100111001111000 ,0b00000010101010011101011110000100 ,0b11110001011110000011010110000001 ,0b10110110000100011100101000000000};
+// uint32_t  gSequence7n73[4] = { 0b01100011100011011100110100111010 ,0b01011110001101110101101010101100 ,0b00011001110001000001101010000001 ,0b00010011001110010101010000000000};
+// uint32_t  gSequence7n74[4] = { 0b01100110101010011100001111010100 ,0b00111111110000011000000001100011 ,0b00011011011011101000100110110100 ,0b00000111001010111010001000000000};
+// uint32_t  gSequence7n75[4] = { 0b01101001000011001101111010110010 ,0b11010000100100011100010110101111 ,0b10011000011011111100000110011001 ,0b11101000000101100010000000000000};
+// uint32_t  gSequence7n76[4] = { 0b00001000011101001001100100100111 ,0b01010111101011111111110101011011 ,0b00001100011000110100100100000101 ,0b11010101110110101100010000000000};
+// uint32_t  gSequence7n77[4] = { 0b00010110111100001010100100101111 ,0b11111010011110110100110111001000 ,0b10111010110101001111110001010110 ,0b00110110111111101111111000000000};
+// uint32_t  gSequence7n78[4] = { 0b00010010100110001011111010110110 ,0b01111001100011010101010000111101 ,0b00011001010111011111011100011011 ,0b01001101110011100110100000000000};
+// uint32_t  gSequence7n79[4] = { 0b01100010011001100111101001011111 ,0b00001100000001011011001000100011 ,0b00101111110111001011000001111011 ,0b00001011010100000001011000000000};
+// uint32_t  gSequence7n80[4] = { 0b01101101000101001110011101101011 ,0b01110100100001110001111101101010 ,0b01100011100000110101000100000010 ,0b10001011010011000110010000000000};
+// uint32_t  gSequence7n81[4] = { 0b01111010100111001011101001010000 ,0b11011100010011101101100111001111 ,0b00000000000100000100010011011110 ,0b00110001010111011000110000000000};
+// uint32_t  gSequence7n82[4] = { 0b01111111111101011100000010110000 ,0b11000100010010010010111101000011 ,0b01000111000001001000000011101100 ,0b01001111010110110010101000000000};
+// uint32_t  gSequence7n83[4] = { 0b01011100101011100110101100010000 ,0b01010110100011110001111110011001 ,0b11111000111100010110101000001000 ,0b11010110011101010011101000000000};
+// uint32_t  gSequence7n84[4] = { 0b01010011001001000100100100000010 ,0b01101011000011011001010100001110 ,0b10111011010101110000000001111101 ,0b11110101011010111001100000000000};
+// uint32_t  gSequence7n85[4] = { 0b01000000010111001100101001000000 ,0b00110111100100110001100000100110 ,0b01010011111010110010111101111101 ,0b01010000010000110000011000000000};
+// uint32_t  gSequence7n86[4] = { 0b01000101011110001100010010101110 ,0b01010110011001011100001011101001 ,0b01010001010000011011110001001000 ,0b01000100010100011111000000000000};
+// uint32_t  gSequence7n87[4] = { 0b01001010110111011101100111001000 ,0b10111001001101011000011100100101 ,0b11010010010000001111010001100101 ,0b10101011011011000111001000000000};
+// uint32_t  gSequence7n88[4] = { 0b00011110100001000011000000001000 ,0b10101101110101001011000010010011 ,0b10110110101101111011010101010011 ,0b11100011001001000011101000000000};
+// uint32_t  gSequence7n89[4] = { 0b00011010111011000010011110010001 ,0b00101110001000101010100101100110 ,0b00010101001111101011111000011110 ,0b10011000000101001010110000000000};
+// uint32_t  gSequence7n90[4] = { 0b01101010000100101110001101111000 ,0b01011011101010100100111101111000 ,0b00100011101111111111100101111110 ,0b11011110100010101101001000000000};
+// uint32_t  gSequence7n91[4] = { 0b01100101011000000111111001001100 ,0b00100011001010001110001000110001 ,0b01101111111000000001100000000111 ,0b01011110100101101010000000000000};
+// uint32_t  gSequence7n92[4] = { 0b01110010111010000010001101110111 ,0b10001011111000010010010010010100 ,0b00001100011100110000110111011011 ,0b11100100100001110100100000000000};
+// uint32_t  gSequence7n93[4] = { 0b01110111100000010101100110010111 ,0b10010011111001101101001000011000 ,0b01001011011001111100100111101001 ,0b10011010100000011110111000000000};
+// uint32_t  gSequence7n94[4] = { 0b01010100110110101111001000110111 ,0b00000001001000001110001011000010 ,0b11110100100100100010001100001101 ,0b00000011101011111111111000000000};
+// uint32_t  gSequence7n95[4] = { 0b01011011010100001101000000100101 ,0b00111100101000100110100001010101 ,0b10110111001101000100100101111000 ,0b00100000101100010101110000000000};
+// uint32_t  gSequence7n96[4] = { 0b01001000001010000101001101100111 ,0b01100000001111001110010101111101 ,0b01011111100010000110011001111000 ,0b10000101100110011100001000000000};
+// uint32_t  gSequence7n97[4] = { 0b01001101000011000101110110001001 ,0b00000001110010100011111110110010 ,0b01011101001000101111010101001101 ,0b10010001100010110011010000000000};
+// uint32_t  gSequence7n98[4] = { 0b01000010101010010100000011101111 ,0b11101110100110100111101001111110 ,0b11011110001000111011110101100000 ,0b01111110101101101011011000000000};
+// uint32_t  gSequence7n99[4] = { 0b00000100011010000001011110011001 ,0b10000011111101100001100111110101 ,0b10100011100010010000101101001101 ,0b01111011001100001001011000000000};
+// uint32_t gSequence7n100[4] = { 0b01110100100101101101001101110000 ,0b11110110011111101111111111101011 ,0b10010101000010000100110000101101 ,0b00111101101011101110100000000000};
+// uint32_t gSequence7n101[4] = { 0b01111011111001000100111001000100 ,0b10001110111111000101001010100010 ,0b11011001010101111010110101010100 ,0b10111101101100101001101000000000};
+// uint32_t gSequence7n102[4] = { 0b01101100011011000001001101111111 ,0b00100110001101011001010000000111 ,0b10111010110001001011100010001000 ,0b00000111101000110111001000000000};
+// uint32_t gSequence7n103[4] = { 0b01101001000001010110100110011111 ,0b00111110001100100110001010001011 ,0b11111101110100000111110010111010 ,0b01111001101001011101010000000000};
+// uint32_t gSequence7n104[4] = { 0b01001010010111101100001000111111 ,0b10101100111101000101001001010001 ,0b01000010001001011001011001011110 ,0b11100000100010111100010000000000};
+// uint32_t gSequence7n105[4] = { 0b01000101110101001110000000101101 ,0b10010001011101101101100011000110 ,0b00000001100000111111110000101011 ,0b11000011100101010110011000000000};
+// uint32_t gSequence7n106[4] = { 0b01010110101011000110001101101111 ,0b11001101111010000101010111101110 ,0b11101001001111111101001100101011 ,0b01100110101111011111100000000000};
+// uint32_t gSequence7n107[4] = { 0b01010011100010000110110110000001 ,0b10101100000111101000111100100001 ,0b11101011100101010100000000011110 ,0b01110010101011110000111000000000};
+// uint32_t gSequence7n108[4] = { 0b01011100001011010111000011100111 ,0b01000011010011101100101011101101 ,0b01101000100101000000100000110011 ,0b10011101100100101000110000000000};
+// uint32_t gSequence7n109[4] = { 0b01110000111111101100010011101001 ,0b01110101100010001110011000011110 ,0b00110110100000010100011101100000 ,0b01000110100111100111111000000000};
+// uint32_t gSequence7n110[4] = { 0b01111111100011000101100111011101 ,0b00001101000010100100101101010111 ,0b01111010110111101010011000011001 ,0b11000110100000100000110000000000};
+// uint32_t gSequence7n111[4] = { 0b01101000000001000000010011100110 ,0b10100101110000111000110111110010 ,0b00011001010011011011001111000101 ,0b01111100100100111110010000000000};
+// uint32_t gSequence7n112[4] = { 0b01101101011011010111111000000110 ,0b10111101110001000111101101111110 ,0b01011110010110010111011111110111 ,0b00000010100101010100001000000000};
+// uint32_t gSequence7n113[4] = { 0b01001110001101101101010110100110 ,0b00101111000000100100101110100100 ,0b11100001101011001001110100010011 ,0b10011011101110110101001000000000};
+// uint32_t gSequence7n114[4] = { 0b01000001101111001111011110110100 ,0b00010010100000001100000100110011 ,0b10100010000010101111011101100110 ,0b10111000101001011111000000000000};
+// uint32_t gSequence7n115[4] = { 0b01010010110001000111010011110110 ,0b01001110000111100100110000011011 ,0b01001010101101101101100001100110 ,0b00011101100011010110111000000000};
+// uint32_t gSequence7n116[4] = { 0b01010111111000000111101000011000 ,0b00101111111010001001011011010100 ,0b01001000000111000100101101010011 ,0b00001001100111111001100000000000};
+// uint32_t gSequence7n117[4] = { 0b01011000010001010110011101111110 ,0b11000000101110001101001100011000 ,0b11001011000111010000001101111110 ,0b11100110101000100001101000000000};
+// uint32_t gSequence7n118[4] = { 0b00001111011100101001110100110100 ,0b01111000100000101010110101001001 ,0b01001100010111111110000101111001 ,0b10000000000111000111001000000000};
+// uint32_t gSequence7n119[4] = { 0b00011000111110101100000000001111 ,0b11010000010010110110101111101100 ,0b00101111110011001111010010100101 ,0b00111010000011011001101000000000};
+// uint32_t gSequence7n120[4] = { 0b00011101100100111011101011101111 ,0b11001000010011001001110101100000 ,0b01101000110110000011000010010111 ,0b01000100000010110011110000000000};
+// uint32_t gSequence7n121[4] = { 0b00111110110010000001000101001111 ,0b01011010100010101010110110111010 ,0b11010111001011011101101001110011 ,0b11011101001001010010110000000000};
+// uint32_t gSequence7n122[4] = { 0b00110001010000100011001101011101 ,0b01100111000010000010011100101101 ,0b10010100100010111011000000000110 ,0b11111110001110111000111000000000};
+// uint32_t gSequence7n123[4] = { 0b00100010001110101011000000011111 ,0b00111011100101101010101000000101 ,0b01111100001101111001111100000110 ,0b01011011000100110001000000000000};
+// uint32_t gSequence7n124[4] = { 0b00100111000111101011111011110001 ,0b01011010011000000111000011001010 ,0b01111110100111010000110000110011 ,0b01001111000000011110011000000000};
+// uint32_t gSequence7n125[4] = { 0b00101000101110111010001110010111 ,0b10110101001100000011010100000110 ,0b11111101100111000100010000011110 ,0b10100000001111000110010000000000};
+// uint32_t gSequence7n126[4] = { 0b00010111100010000101110100111011 ,0b10101000110010011100011010100101 ,0b01100011100100110001010111011100 ,0b10111010000100011110100000000000};
+// uint32_t gSequence7n127[4] = { 0b00010010111000010010011111011011 ,0b10110000110011100011000000101001 ,0b00100100100001111101000111101110 ,0b11000100000101110100111000000000};
+// uint32_t gSequence7n128[4] = { 0b00110001101110101000110001111011 ,0b00100010000010000000000011110011 ,0b10011011011100100011101100001010 ,0b01011101001110010101111000000000};
+// uint32_t gSequence7n129[4] = { 0b00111110001100001010111001101001 ,0b00011111100010101000101001100100 ,0b11011000110101000101000101111111 ,0b01111110001001111111110000000000};
+// uint32_t gSequence7n130[4] = { 0b00101101010010000010110100101011 ,0b01000011000101000000011101001100 ,0b00110000011010000111111001111111 ,0b11011011000011110110001000000000};
+// uint32_t gSequence7n131[4] = { 0b00101000011011000010001111000101 ,0b00100010111000101101110110000011 ,0b00110010110000101110110101001010 ,0b11001111000111011001010000000000};
+// uint32_t gSequence7n132[4] = { 0b00100111110010010011111010100011 ,0b11001101101100101001100001001111 ,0b10110001110000111010010101100111 ,0b00100000001000000001011000000000};
+// uint32_t gSequence7n133[4] = { 0b00000101011010010111101011100000 ,0b00011000000001111111011010001100 ,0b01000111000101001100010000110010 ,0b01111110000001101010011000000000};
+// uint32_t gSequence7n134[4] = { 0b00100110001100101101000101000000 ,0b10001010110000011100011001010110 ,0b11111000111000010010111011010110 ,0b11100111001010001011011000000000};
+// uint32_t gSequence7n135[4] = { 0b00101001101110001111001101010010 ,0b10110111010000110100110011000001 ,0b10111011010001110100010010100011 ,0b11000100001101100001010000000000};
+// uint32_t gSequence7n136[4] = { 0b00111010110000000111000000010000 ,0b11101011110111011100000111101001 ,0b01010011111110110110101110100011 ,0b01100001000111101000101000000000};
+// uint32_t gSequence7n137[4] = { 0b00111111111001000111111011111110 ,0b10001010001010110001101100100110 ,0b01010001010100011111100010010110 ,0b01110101000011000111110000000000};
+// uint32_t gSequence7n138[4] = { 0b00110000010000010110001110011000 ,0b01100101011110110101111011101010 ,0b11010010010100001011000010111011 ,0b10011010001100011111111000000000};
+// uint32_t gSequence7n139[4] = { 0b00100011010110111010101110100000 ,0b10010010110001100011000011011010 ,0b10111111111101011110101011100100 ,0b10011001001011100001000000000000};
+// uint32_t gSequence7n140[4] = { 0b00101100110100011000100110110010 ,0b10101111010001001011101001001101 ,0b11111100010100111000000010010001 ,0b10111010001100001011001000000000};
+// uint32_t gSequence7n141[4] = { 0b00111111101010010000101011110000 ,0b11110011110110100011011101100101 ,0b00010100111011111010111110010001 ,0b00011111000110000010110000000000};
+// uint32_t gSequence7n142[4] = { 0b00111010100011010000010000011110 ,0b10010010001011001110110110101010 ,0b00010110010001010011110010100100 ,0b00001011000010101101101000000000};
+// uint32_t gSequence7n143[4] = { 0b00110101001010000001100101111000 ,0b01111101011111001010100001100110 ,0b10010101010001000111010010001001 ,0b11100100001101110101100000000000};
+// uint32_t gSequence7n144[4] = { 0b00001111100010100010001000010010 ,0b00111101100000101000101010010111 ,0b01000011101001100110101001110101 ,0b00100011000111101010001000000000};
+// uint32_t gSequence7n145[4] = { 0b00011100111100101010000101010000 ,0b01100001000111000000011110111111 ,0b10101011000110100100010101110101 ,0b10000110001101100011110000000000};
+// uint32_t gSequence7n146[4] = { 0b00011001110101101010111110111110 ,0b00000000111010101101110101110000 ,0b10101001101100001101011001000000 ,0b10010010001001001100101000000000};
+// uint32_t gSequence7n147[4] = { 0b00010110011100111011001011011000 ,0b11101111101110101001100010111100 ,0b00101010101100011001111001101101 ,0b01111101000110010100100000000000};
+// uint32_t gSequence7n148[4] = { 0b00010011011110001000001101000010 ,0b01011100100111101000110100101000 ,0b11101000101111000010111100000000 ,0b10100101001010001001111000000000};
+// uint32_t gSequence7n149[4] = { 0b00010110010111001000110110101100 ,0b00111101011010000101011111100111 ,0b11101010000101101011110000110101 ,0b10110001001110100110100000000000};
+// uint32_t gSequence7n150[4] = { 0b00011001111110011001000011001010 ,0b11010010001110000001001000101011 ,0b01101001000101111111010000011000 ,0b01011110000001111110101000000000};
+// uint32_t gSequence7n151[4] = { 0b00000101001001000000111011101110 ,0b01100001111101101101101011001111 ,0b00000010101010101001001100110101 ,0b00010100000100101111011000000000};
+// uint32_t gSequence7n152[4] = { 0b00001010100000010001001110001000 ,0b10001110101001101001111100000011 ,0b10000001101010111101101100011000 ,0b11111011001011110111010000000000};
+// uint32_t gSequence7n153[4] = { 0b00001111101001010001110101100110 ,0b11101111010100000100010111001100 ,0b10000011000000010100100000101101 ,0b11101111001111011000001000000000};
+
+
+// const GSequence gsequences[] = {
+//     // 31-bit sequences
+//     {gSequence5n1, 31, 1}, {gSequence5n2, 31, 2}, {gSequence5n3, 31, 3},
+//     {gSequence5n4, 31, 4}, {gSequence5n5, 31, 5}, {gSequence5n6, 31, 6},
+//     {gSequence5n7, 31, 7}, {gSequence5n8, 31, 8}, {gSequence5n9, 31, 9},
+//     {gSequence5n10, 31, 10}, {gSequence5n11, 31, 11}, {gSequence5n12, 31, 12},
+//     {gSequence5n13, 31, 13}, {gSequence5n14, 31, 14}, {gSequence5n15, 31, 15},
+
+//     // 63-bit sequences
+//     {gSequence6n1, 63, 1}, {gSequence6n2, 63, 2}, {gSequence6n3, 63, 3},
+//     {gSequence6n4, 63, 4}, {gSequence6n5, 63, 5}, {gSequence6n6, 63, 6},
+//     {gSequence6n7, 63, 7}, {gSequence6n8, 63, 8}, {gSequence6n9, 63, 9},
+//     {gSequence6n10, 63, 10}, {gSequence6n11, 63, 11}, {gSequence6n12, 63, 12},
+//     {gSequence6n13, 63, 13}, {gSequence6n14, 63, 14}, {gSequence6n15, 63, 15},
+
+//     // 127-bit sequences
+//     {gSequence7n1, 127, 0b00000001}, {gSequence7n2, 127, 0b00000010}, {gSequence7n3, 127, 0b00000011},
+//     {gSequence7n4, 127, 0b00000100}, {gSequence7n5, 127, 0b00000101}, {gSequence7n6, 127, 0b00000110},
+//     {gSequence7n7, 127, 0b00000111}, {gSequence7n8, 127, 0b00001000}, {gSequence7n9, 127, 0b00001001},
+//     {gSequence7n10, 127, 0b00001010}, {gSequence7n11, 127, 0b00001011}, {gSequence7n12, 127, 0b00001100},
+//     {gSequence7n13, 127, 0b00001101}, {gSequence7n14, 127, 0b00001110}, {gSequence7n15, 127, 0b00001111},
+//     {gSequence7n16, 127, 0b00010000}, {gSequence7n17, 127, 0b00010001}, {gSequence7n18, 127, 0b00010010},
+//     {gSequence7n19, 127, 0b00010011}, {gSequence7n20, 127, 0b00010100}, {gSequence7n21, 127, 0b00010101},
+//     {gSequence7n22, 127, 0b00010110}, {gSequence7n23, 127, 0b00010111}, {gSequence7n24, 127, 0b00011000},
+//     {gSequence7n25, 127, 0b00011001}, {gSequence7n26, 127, 0b00011010}, {gSequence7n27, 127, 0b00011011},
+//     {gSequence7n28, 127, 0b00011100}, {gSequence7n29, 127, 0b00011101}, {gSequence7n30, 127, 0b00011110},
+//     {gSequence7n31, 127, 0b00011111}, {gSequence7n32, 127, 0b00100000}, {gSequence7n33, 127, 0b00100001},
+//     {gSequence7n34, 127, 0b00100010}, {gSequence7n35, 127, 0b00100011}, {gSequence7n36, 127, 0b00100100},
+//     {gSequence7n37, 127, 0b00100101}, {gSequence7n38, 127, 0b00100110}, {gSequence7n39, 127, 0b00100111},
+//     {gSequence7n40, 127, 0b00101000}, {gSequence7n41, 127, 0b00101001}, {gSequence7n42, 127, 0b00101010},
+//     {gSequence7n43, 127, 0b00101011}, {gSequence7n44, 127, 0b00101100}, {gSequence7n45, 127, 0b00101101},
+//     {gSequence7n46, 127, 0b00101110}, {gSequence7n47, 127, 0b00101111}, {gSequence7n48, 127, 0b00110000},
+//     {gSequence7n49, 127, 0b00110001}, {gSequence7n50, 127, 0b00110010}, {gSequence7n51, 127, 0b00110011},
+//     {gSequence7n52, 127, 0b00110100}, {gSequence7n53, 127, 0b00110101}, {gSequence7n54, 127, 0b00110110},
+//     {gSequence7n55, 127, 0b00110111}, {gSequence7n56, 127, 0b00111000}, {gSequence7n57, 127, 0b00111001},
+//     {gSequence7n58, 127, 0b00111010}, {gSequence7n59, 127, 0b00111011}, {gSequence7n60, 127, 0b00111100},
+//     {gSequence7n61, 127, 0b00111101}, {gSequence7n62, 127, 0b00111110}, {gSequence7n63, 127, 0b00111111},
+//     {gSequence7n64, 127, 0b01000000}, {gSequence7n65, 127, 0b01000001}, {gSequence7n66, 127, 0b01000010},
+//     {gSequence7n67, 127, 0b01000011}, {gSequence7n68, 127, 0b01000100}, {gSequence7n69, 127, 0b01000101},
+//     {gSequence7n70, 127, 0b01000110}, {gSequence7n71, 127, 0b01000111}, {gSequence7n72, 127, 0b01001000},
+//     {gSequence7n73, 127, 0b01001001}, {gSequence7n74, 127, 0b01001010}, {gSequence7n75, 127, 0b01001011},
+//     {gSequence7n76, 127, 0b01001100}, {gSequence7n77, 127, 0b01001101}, {gSequence7n78, 127, 0b01001110},
+//     {gSequence7n79, 127, 0b01001111}, {gSequence7n80, 127, 0b01010000}, {gSequence7n81, 127, 0b01010001},
+//     {gSequence7n82, 127, 0b01010010}, {gSequence7n83, 127, 0b01010011}, {gSequence7n84, 127, 0b01010100},
+//     {gSequence7n85, 127, 0b01010101}, {gSequence7n86, 127, 0b01010110}, {gSequence7n87, 127, 0b01010111},
+//     {gSequence7n88, 127, 0b01011000}, {gSequence7n89, 127, 0b01011001}, {gSequence7n90, 127, 0b01011010},
+//     {gSequence7n91, 127, 0b01011011}, {gSequence7n92, 127, 0b01011100}, {gSequence7n93, 127, 0b01011101},
+//     {gSequence7n94, 127, 0b01011110}, {gSequence7n95, 127, 0b01011111}, {gSequence7n96, 127, 0b01100000},
+//     {gSequence7n97, 127, 0b01100001}, {gSequence7n98, 127, 0b01100010}, {gSequence7n99, 127, 0b01100011},
+//     {gSequence7n100, 127, 0b01100100}, {gSequence7n101, 127, 0b01100101}, {gSequence7n102, 127, 0b01100110},
+//     {gSequence7n103, 127, 0b01100111}, {gSequence7n104, 127, 0b01101000}, {gSequence7n105, 127, 0b01101001},
+//     {gSequence7n106, 127, 0b01101010}, {gSequence7n107, 127, 0b01101011}, {gSequence7n108, 127, 0b01101100},
+//     {gSequence7n109, 127, 0b01101101}, {gSequence7n110, 127, 0b01101110}, {gSequence7n111, 127, 0b01101111},
+//     {gSequence7n112, 127, 0b01110000}, {gSequence7n113, 127, 0b01110001}, {gSequence7n114, 127, 0b01110010},
+//     {gSequence7n115, 127, 0b01110011}, {gSequence7n116, 127, 0b01110100}, {gSequence7n117, 127, 0b01110101},
+//     {gSequence7n118, 127, 0b01110110}, {gSequence7n119, 127, 0b01110111}, {gSequence7n120, 127, 0b01111000},
+//     {gSequence7n121, 127, 0b01111001}, {gSequence7n122, 127, 0b01111010}, {gSequence7n123, 127, 0b01111011},
+//     {gSequence7n124, 127, 0b01111100}, {gSequence7n125, 127, 0b01111101}, {gSequence7n126, 127, 0b01111110},
+//     {gSequence7n127, 127, 0b01111111}, {gSequence7n128, 127, 0b10000000}, {gSequence7n129, 127, 0b10000001},
+//     {gSequence7n130, 127, 0b10000010}, {gSequence7n131, 127, 0b10000011}, {gSequence7n132, 127, 0b10000100},
+//     {gSequence7n133, 127, 0b10000101}, {gSequence7n134, 127, 0b10000110}, {gSequence7n135, 127, 0b10000111},
+//     {gSequence7n136, 127, 0b10001000}, {gSequence7n137, 127, 0b10001001}, {gSequence7n138, 127, 0b10001010},
+//     {gSequence7n139, 127, 0b10001011}, {gSequence7n140, 127, 0b10001100}, {gSequence7n141, 127, 0b10001101},
+//     {gSequence7n142, 127, 0b10001110}, {gSequence7n143, 127, 0b10001111}, {gSequence7n144, 127, 0b10010000},
+//     {gSequence7n145, 127, 0b10010001}, {gSequence7n146, 127, 0b10010010}, {gSequence7n147, 127, 0b10010011},
+//     {gSequence7n148, 127, 0b10010100}, {gSequence7n149, 127, 0b10010101}, {gSequence7n150, 127, 0b10010110},
+//     {gSequence7n151, 127, 0b10010111}, {gSequence7n152, 127, 0b10011000}, {gSequence7n153, 127, 0b10011001}
+
+// };

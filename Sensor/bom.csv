@@ -1,0 +1,13 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+C1,1206,1,1.5nC,
+"C2, C3",1206,2,0.22uC,
+D1,SOD3716X135N,1,D_Schottky,
+J1,SolderJumper-3_P1.3mm_Open_RoundedPad1.0x1.5mm_NumberLabels,1,Conn_01x03_Pin,
+J2,PRT16766,1,PRT-16766,
+Q1,APDA3020P3CP22,1,APDA3020P3C-P22,
+R1,1206,1,1MR,
+"R2, R5",1206,2,220kR,
+R3,1206,1,22kR,
+R4,1206,1,100kR,
+TP1,TestPoint_Pad_1.0x1.0mm,1,TH Testpoint,
+U2,SOIC127P600X175-8N,1,MCP6002-I_SN,
